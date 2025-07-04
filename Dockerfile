@@ -19,6 +19,7 @@ RUN apk update && \
         apk add postgresql-libs && \
         apk add --virtual .build-deps alpine-sdk musl-dev postgresql-dev && \
         pip --disable-pip-version-check --no-cache-dir install poetry && \
+        poetry lock && \
         poetry install && \
         apk --purge del .build-deps
 

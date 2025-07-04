@@ -2,10 +2,11 @@ import os
 import uuid
 import functools
 import asyncio
+from pprint import pformat
 
 from quart import Quart, abort, make_response, request, jsonify, redirect, url_for
 from quart.exceptions import HTTPStatusException
-
+from lidarrmetadata.prometheus import metric_request_time_histogram, metric_request_time, metric_request_count, serve_prom_metrics
 import redis
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
@@ -25,6 +26,7 @@ from lidarrmetadata import chart
 from lidarrmetadata import config
 from lidarrmetadata import provider
 from lidarrmetadata import util
+
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler())
@@ -66,7 +68,58 @@ async def add_cache_control_header(response, expiry = provider.utcnow() + timede
         else:
             response.cache_control.no_cache = True
     return response
-    
+
+def time_request(route):
+    """
+    Decorator to measure request execution time.
+    """
+    def _time_request(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            start_time = time.time()
+            response = await func(*args, **kwargs)
+            end_time = time.time()
+            execution_time = end_time - start_time
+            execution_time_seconds = float(f"{execution_time:.4f}")
+
+            """logger.info(f"func={__name__}:{func.__name__} "
+                        f"endpoint={request.path} "
+                        f"method={request.method} "
+                        f"status_code={response.status_code} "
+                        f"time={execution_time_seconds} seconds")"""
+            fname = f"{__name__}:{func.__name__}"
+            
+            """metric_request_time_gauge.labels(method=request.method,
+                                             fname=f"{__name__}:{func.__name__}",
+                                             endpoint=route,
+                                             status_code=response.status_code).clear()
+            """
+            
+            """metric_request_time_histogram.labels(method=request.method,
+                                             fname=f"{__name__}:{func.__name__}",
+                                             endpoint=route,
+                                             status_code=response.status_code).observe(execution_time_seconds)"""
+            
+            metric_request_time_histogram.labels(method=request.method,
+                                                 fname=f"{__name__}:{func.__name__}",
+                                                 endpoint=route,
+                                                 status_code=response.status_code).observe(execution_time_seconds)
+
+            metric_request_time.labels(method=request.method,
+                                       fname=f"{__name__}:{func.__name__}",
+                                       endpoint=route,
+                                       status_code=response.status_code).set(execution_time_seconds)
+            
+            metric_request_count.labels(method=request.method,
+                                       fname=f"{__name__}:{func.__name__}",
+                                       endpoint=route,
+                                       status_code=response.status_code).inc()
+
+            return response
+        return wrapper
+    return _time_request
+
+
 # Decorator to disable caching by endpoint
 def no_cache(func):
     @functools.wraps(func)
@@ -116,7 +169,7 @@ async def handle_error(e):
 @app.errorhandler(redis.ConnectionError)
 def handle_error(e):
     return jsonify(error='Could not connect to redis'), 503
-
+    from functools import wraps
 @app.errorhandler(redis.BusyLoadingError)
 def handle_error(e):
     return jsonify(error='Redis not ready'), 503
@@ -134,11 +187,15 @@ def validate_mbid(mbid):
 
 @app.route('/')
 @no_cache
+# @time_request
 async def default_route():
     """
     Default route with API information
     :return:
     """
+    # logger.info(f"request={pformat(request)}")
+    keys = [i for i in dir(request) if not i.startswith('_')]
+    # logger.info(f"request object keys={keys}")
     vintage_providers = provider.get_providers_implementing(
         provider.DataVintageMixin)
     
@@ -152,8 +209,14 @@ async def default_route():
     }
     return jsonify(info)
 
+# exporter metrics endpoint
+@app.route("/metrics")
+@no_cache
+async def metrics():
+    return serve_prom_metrics()
 
 @app.route('/artist/<mbid>', methods=['GET'])
+@time_request('/artist/<mbid>')
 async def get_artist_info_route(mbid):
     uuid_validation_response = validate_mbid(mbid)
     if uuid_validation_response:
@@ -189,6 +252,7 @@ async def get_artist_info_route(mbid):
     return await add_cache_control_header(jsonify(artist), expiry)
 
 @app.route('/artist/<mbid>/refresh', methods=['POST'])
+@time_request('/artist/<mbid>/refresh')
 async def refresh_artist_route(mbid):
     uuid_validation_response = validate_mbid(mbid)
     if uuid_validation_response:
@@ -199,8 +263,8 @@ async def refresh_artist_route(mbid):
     await invalidate_cloudflare([f'{base_url}/artist/{mbid}'])
     return jsonify(success=True)
 
-
 @app.route('/album/<mbid>', methods=['GET'])
+@time_request('/album/<mbid>')
 async def get_release_group_info_route(mbid):
     
     uuid_validation_response = validate_mbid(mbid)
@@ -212,6 +276,7 @@ async def get_release_group_info_route(mbid):
     return await add_cache_control_header(jsonify(output), expiry)
 
 @app.route('/album/<mbid>/refresh', methods=['POST'])
+@time_request('/album/<mbid>/refresh')
 async def refresh_release_group_route(mbid):
     uuid_validation_response = validate_mbid(mbid)
     if uuid_validation_response:
@@ -224,6 +289,7 @@ async def refresh_release_group_route(mbid):
 
 @app.route('/recent/artist', methods=['GET'])
 @no_cache
+@time_request('/recent/artist')
 async def get_recently_updated_artists():
 
     arg = int(request.args.get('since', '0'))
@@ -233,6 +299,7 @@ async def get_recently_updated_artists():
     return jsonify(updated)
 
 @app.route('/recent/album', methods=['GET'])
+@time_request('/recent/album')
 async def get_recently_updated_albums():
 
     arg = int(request.args.get('since', '0'))
@@ -242,6 +309,7 @@ async def get_recently_updated_albums():
     return jsonify(updated)
 
 @app.route('/chart/<name>/<type_>/<selection>')
+@time_request('/chart/<name>/<type_>/<selection>')
 async def chart_route(name, type_, selection):
     """
     Gets chart
@@ -277,6 +345,7 @@ async def chart_route(name, type_, selection):
         return await add_cache_control_header(jsonify(result), expiry)
 
 @app.route('/series/<mbid>')
+@time_request('/series/<mbid>')
 async def series_route(mbid):
     series_provider = provider.get_providers_implementing(provider.SeriesMixin)[0]
     result = await series_provider.get_series(mbid)
@@ -285,6 +354,7 @@ async def series_route(mbid):
     return await add_cache_control_header(jsonify(result), expiry)
 
 @app.route('/search/album')
+@time_request('/search/album')
 async def search_album():
     """Search for a human-readable album
     ---
@@ -351,6 +421,7 @@ async def get_album_search_results(query, limit, include_tracks, artist_name):
         abort(500, "No album search providers")
 
 @app.route('/search/artist', methods=['GET'])
+@time_request('/search/artist')
 async def search_artist():
     """Search for a human-readable artist
     ---
@@ -416,6 +487,7 @@ async def get_artist_search_results(query, limit):
     return artists, scores, validity
 
 @app.route('/search/all', methods=['GET'])
+@time_request('/search/all')
 async def search_all():
     query = get_search_query()
 
@@ -444,6 +516,7 @@ async def search_all():
     return await add_cache_control_header(jsonify(results), validity)
 
 @app.route('/search/fingerprint', methods=['POST'])
+@time_request('/search/fingerprint')
 async def search_fingerprint():
     ids = await request.json
 
@@ -460,6 +533,7 @@ async def search_fingerprint():
     return await add_cache_control_header(jsonify(albums), validity)
 
 @app.route('/search')
+@time_request('/search')
 async def search_route():
     type = request.args.get('type', None)
 
@@ -475,6 +549,7 @@ async def search_route():
         return error, 400
 
 @app.route('/spotify/artist/<spotify_id>', methods=['GET'])
+@time_request('/spotify/artist/<spotify_id>')
 async def spotify_lookup_artist(spotify_id):
     mbid, expires = await util.SPOTIFY_CACHE.get(spotify_id)
 
@@ -515,6 +590,7 @@ async def spotify_lookup_artist(spotify_id):
     return redirect(app.config['ROOT_PATH'] + url_for('get_artist_info_route', mbid=spotifyalbum['ArtistMusicBrainzId']), 301)
 
 @app.route('/spotify/album/<spotify_id>', methods=['GET'])
+@time_request('/spotify/album/<spotify_id>')
 async def spotify_lookup_album(spotify_id):
     mbid, expires = await util.SPOTIFY_CACHE.get(spotify_id)
 
@@ -586,6 +662,7 @@ async def spotify_lookup_by_text_search(spotifyalbum):
     return spotifyalbum
 
 @app.route('/spotify/lookup', methods=['POST'])
+@time_request('/spotify/lookup')
 async def spotify_lookup():
     ids = await request.json
 
@@ -596,9 +673,10 @@ async def spotify_lookup():
     output = [{'spotifyid': ids[x], 'musicbrainzid': results[x][0]} for x in range(len(ids))]
 
     return jsonify(output)
-    
+
 @app.route('/invalidate')
 @no_cache
+@time_request('/invalidate')
 async def invalidate_cache():
 
     if request.headers.get('authorization') != app.config['INVALIDATE_APIKEY']:
@@ -694,6 +772,7 @@ async def invalidate_cloudflare(files):
 
 @app.route('/spotify/auth')
 @no_cache
+@time_request('/spotify/auth')
 async def handle_spotify_auth_redirect():
     code = request.args.get('code', '')
     state = request.args.get('state', '')
@@ -719,6 +798,7 @@ async def handle_spotify_auth_redirect():
 
 @app.route('/spotify/renew')
 @no_cache
+@time_request('/spotify/renew')
 async def handle_spotify_token_renew():
     refresh_token = request.args.get('refresh_token', '')
 

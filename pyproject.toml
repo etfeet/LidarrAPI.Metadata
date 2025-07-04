@@ -55,6 +55,7 @@ uvloop = "0.14.0"
 werkzeug = "1.0.1"
 wsproto = "1.1.0"
 yarl = "1.6.3"
+prometheus-client = "0.22.1"
 
 
 [tool.poetry.group.dev.dependencies]
