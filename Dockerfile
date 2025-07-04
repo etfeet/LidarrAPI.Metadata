@@ -28,4 +28,3 @@ RUN adduser --system -u $UID metadata
 USER metadata
 
 ENTRYPOINT ["lidarr-metadata-server"]
-##
