@@ -17,9 +17,7 @@ from lidarrmetadata import limit
 from lidarrmetadata.api import get_artist_info_multi, ArtistNotFoundException, get_release_group_info_multi, ReleaseGroupNotFoundException
 
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler())
-logger.setLevel(logging.DEBUG)
-logger.info('Have crawler logger')
+
 
 CONFIG = get_config()
 
@@ -193,7 +191,10 @@ async def initialize():
     )
     
 def main():
-    
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(levelname)s %(module)s %(funcName)s %(message)s',
+                        handlers=[logging.StreamHandler()])
+
     parser = argparse.ArgumentParser(prog="lidarr-metadata-crawler")
     parser.add_argument("--initialize-artists", action="store_true")
     parser.add_argument("--initialize-albums", action="store_true")

@@ -15,12 +15,11 @@ from lidarrmetadata import config
 from lidarrmetadata import cache
 
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler())
-logger.setLevel(logging.DEBUG)
-logger.info('Have util logger')
-
+#logger.addHandler(logging.StreamHandler())
+#logger.setLevel(logging.INFO)
 
 CONFIG = config.get_config()
+
 if CONFIG.USE_CACHE:
     logger.debug('using cache')
     caches.set_config(CONFIG.CACHE_CONFIG)
@@ -51,6 +50,16 @@ def first_key_item(dictionary, key, default=None):
         return value[0]
 
     return value
+
+
+def string_to_bool(s):
+    s = s.lower()  # Convert to lowercase for case-insensitivity
+    if s == 'true' or s == '1' or s == 'yes' or s == 'on':
+        return True
+    elif s == 'false' or s == '0' or s == 'no' or s == 'off':
+        return False
+    else:
+        raise ValueError(f"Cannot convert '{s}' to boolean.")
 
 
 class SentryProcessor(object):

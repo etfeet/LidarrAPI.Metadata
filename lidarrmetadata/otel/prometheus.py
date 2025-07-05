@@ -17,7 +17,13 @@ metric_request_time = Gauge(
     registry=registry, # Use the custom registry
 )
 
-metric_request_count = Counter(
+metric_request_active_count = Gauge(
+    "http_request_active_count",
+    "number of active http requests",
+    registry=registry, # Use the custom registry
+)
+
+metric_request_count = Gauge(
     "http_request_time_seconds_sum",
     "Count of HTTP requests",
     ["method", "fname", "endpoint", "status_code"], # Labels for method, endpoint, and status code
@@ -25,5 +31,5 @@ metric_request_count = Counter(
 )
 
 
-def serve_prom_metrics():
+def render_prometheus_exporter_metrics():
     return generate_latest(registry), 200, {'Content-Type': CONTENT_TYPE_LATEST}

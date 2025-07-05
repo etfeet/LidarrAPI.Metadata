@@ -1,4 +1,5 @@
 import os
+import socket
 import uuid
 import functools
 import asyncio
@@ -6,7 +7,7 @@ from pprint import pformat
 
 from quart import Quart, abort, make_response, request, jsonify, redirect, url_for
 from quart.exceptions import HTTPStatusException
-from lidarrmetadata.prometheus import metric_request_time_histogram, metric_request_time, metric_request_count, serve_prom_metrics
+from hypercorn.middleware import ProxyFixMiddleware
 import redis
 import sentry_sdk
 from sentry_sdk.integrations.flask import FlaskIntegration
@@ -21,20 +22,25 @@ from spotipy import SpotifyException
 import Levenshtein
 
 import lidarrmetadata
+from lidarrmetadata.otel.metrics import (
+    metric_request_counter,
+    metric_request_duration_gauge,
+    metric_request_duration_histogram,
+    render_prometheus_exporter_metrics
+)
+
 from lidarrmetadata import api
 from lidarrmetadata import chart
 from lidarrmetadata import config
 from lidarrmetadata import provider
 from lidarrmetadata import util
 
-
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler())
-logger.setLevel(logging.INFO)
 logger.info('Have app logger')
 
 app = Quart(__name__)
 app.config.from_object(config.get_config())
+app.asgi_app = ProxyFixMiddleware(app.asgi_app, mode="modern", trusted_hops=1)
 
 if app.config['SENTRY_DSN']:
     if app.config['SENTRY_REDIS_HOST'] is not None:
@@ -82,24 +88,28 @@ def time_request(route):
             execution_time = end_time - start_time
             execution_time_seconds = float(f"{execution_time:.4f}")
 
-            """logger.info(f"func={__name__}:{func.__name__} "
+
+            fname = f"{__name__}:{func.__name__}"
+            """logger.info(f"func={fname} "
                         f"endpoint={request.path} "
                         f"method={request.method} "
                         f"status_code={response.status_code} "
                         f"time={execution_time_seconds} seconds")"""
-            fname = f"{__name__}:{func.__name__}"
             
-            """metric_request_time_gauge.labels(method=request.method,
-                                             fname=f"{__name__}:{func.__name__}",
-                                             endpoint=route,
-                                             status_code=response.status_code).clear()
+            
+            metric_labels = {
+                "endpoint": route,
+                "function": f"{__name__}:{func.__name__}",
+                "method": request.method,
+                "status_code": response.status_code
+            }
+            
+            metric_request_counter.add(1, metric_labels)
+            metric_request_duration_gauge.set(execution_time, metric_labels)
+            metric_request_duration_histogram.record(execution_time_seconds, metric_labels)
+            # metric_request_buckets
+            # requests_counter.add(1, {"endpoint": "/home", "method": "GET"})
             """
-            
-            """metric_request_time_histogram.labels(method=request.method,
-                                             fname=f"{__name__}:{func.__name__}",
-                                             endpoint=route,
-                                             status_code=response.status_code).observe(execution_time_seconds)"""
-            
             metric_request_time_histogram.labels(method=request.method,
                                                  fname=f"{__name__}:{func.__name__}",
                                                  endpoint=route,
@@ -114,7 +124,7 @@ def time_request(route):
                                        fname=f"{__name__}:{func.__name__}",
                                        endpoint=route,
                                        status_code=response.status_code).inc()
-
+            """
             return response
         return wrapper
     return _time_request
@@ -200,11 +210,14 @@ async def default_route():
         provider.DataVintageMixin)
     
     data = await vintage_providers[0].data_vintage()
-
+    #request_headers = request.headers.get()
+    #logger.info(pformat(dir(request)))
+    
     info = {
         'branch': os.getenv('GIT_BRANCH'),
         'commit': os.getenv('COMMIT_HASH'),
         'version': lidarrmetadata.__version__,
+        'remote_addr': request.remote_addr,
         'replication_date': data
     }
     return jsonify(info)
@@ -212,8 +225,8 @@ async def default_route():
 # exporter metrics endpoint
 @app.route("/metrics")
 @no_cache
-async def metrics():
-    return serve_prom_metrics()
+async def get_metrics():
+    return render_prometheus_exporter_metrics()
 
 @app.route('/artist/<mbid>', methods=['GET'])
 @time_request('/artist/<mbid>')
@@ -248,7 +261,6 @@ async def get_artist_info_route(mbid):
                              albums))
 
     artist['Albums'] = albums
-
     return await add_cache_control_header(jsonify(artist), expiry)
 
 @app.route('/artist/<mbid>/refresh', methods=['POST'])
@@ -272,7 +284,6 @@ async def get_release_group_info_route(mbid):
         return uuid_validation_response
     
     output, expiry = await api.get_release_group_info(mbid)
-    
     return await add_cache_control_header(jsonify(output), expiry)
 
 @app.route('/album/<mbid>/refresh', methods=['POST'])
@@ -452,13 +463,14 @@ async def search_artist():
                                     from Ukiah, CA that formed in 1991."
                 }
     """
+
     query = get_search_query()
 
     limit = request.args.get('limit', default=10, type=int)
     limit = None if limit < 1 else limit
 
     artists, scores, validity = await get_artist_search_results(query, limit)
-    
+
     return await add_cache_control_header(jsonify(artists), validity)
 
 async def get_artist_search_results(query, limit):
@@ -489,6 +501,7 @@ async def get_artist_search_results(query, limit):
 @app.route('/search/all', methods=['GET'])
 @time_request('/search/all')
 async def search_all():
+
     query = get_search_query()
 
     limit = request.args.get('limit', default=10, type=int)
@@ -518,6 +531,7 @@ async def search_all():
 @app.route('/search/fingerprint', methods=['POST'])
 @time_request('/search/fingerprint')
 async def search_fingerprint():
+
     ids = await request.json
 
     if ids is None:
@@ -535,6 +549,7 @@ async def search_fingerprint():
 @app.route('/search')
 @time_request('/search')
 async def search_route():
+
     type = request.args.get('type', None)
 
     if type == 'artist':
@@ -592,6 +607,7 @@ async def spotify_lookup_artist(spotify_id):
 @app.route('/spotify/album/<spotify_id>', methods=['GET'])
 @time_request('/spotify/album/<spotify_id>')
 async def spotify_lookup_album(spotify_id):
+
     mbid, expires = await util.SPOTIFY_CACHE.get(spotify_id)
 
     if mbid == 0 and expires > provider.utcnow():
@@ -620,7 +636,6 @@ async def spotify_lookup_album(spotify_id):
         return jsonify(error='Not found'), 404
 
     await util.SPOTIFY_CACHE.set(spotifyalbum['AlbumSpotifyId'], spotifyalbum['AlbumMusicBrainzId'], ttl=None)
-
     return redirect(app.config['ROOT_PATH'] + url_for('get_release_group_info_route', mbid=spotifyalbum['AlbumMusicBrainzId']), 301)
 
 async def spotify_lookup_by_text_search(spotifyalbum):
@@ -664,6 +679,7 @@ async def spotify_lookup_by_text_search(spotifyalbum):
 @app.route('/spotify/lookup', methods=['POST'])
 @time_request('/spotify/lookup')
 async def spotify_lookup():
+
     ids = await request.json
 
     if ids is None:
@@ -671,14 +687,12 @@ async def spotify_lookup():
     
     results = await util.SPOTIFY_CACHE.multi_get(ids)
     output = [{'spotifyid': ids[x], 'musicbrainzid': results[x][0]} for x in range(len(ids))]
-
     return jsonify(output)
 
 @app.route('/invalidate')
 @no_cache
 @time_request('/invalidate')
 async def invalidate_cache():
-
     if request.headers.get('authorization') != app.config['INVALIDATE_APIKEY']:
         return jsonify('Unauthorized'), 401
 
@@ -740,7 +754,6 @@ async def invalidate_cache():
         pass
         
     logger.info('Invalidation complete')
-    
     return jsonify(invalidated)
 
 async def invalidate_cloudflare(files):
@@ -791,7 +804,6 @@ async def handle_spotify_auth_redirect():
     try:
         access_token, expires_in, refresh_token = await spotify_provider.get_token(code)
         newurl = f"{state}?access_token={access_token}&expires_in={expires_in}&refresh_token={refresh_token}";
-
         return redirect(newurl, 302)
     except aiohttp.ClientResponseError as error:
         abort(error.status, f"spotify: {error.message}")

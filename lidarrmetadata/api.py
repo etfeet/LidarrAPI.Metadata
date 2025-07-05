@@ -17,11 +17,8 @@ from lidarrmetadata import provider
 from lidarrmetadata import util
 
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler())
-logger.setLevel(logging.INFO)
-logger.info('Have api logger')
-
 CONFIG = config.get_config()
+
 
 # Set up providers
 for provider_name, (args, kwargs) in CONFIG.PROVIDERS.items():
