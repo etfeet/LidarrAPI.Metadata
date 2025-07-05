@@ -1,6 +1,7 @@
 """
 Code for getting and parsing music charts (Billboard, itunes, etc)
 """
+import logging
 import asyncio
 import billboard
 import pylast
@@ -11,6 +12,9 @@ from lidarrmetadata import api
 from lidarrmetadata import config
 from lidarrmetadata import provider
 from lidarrmetadata import util
+
+logger = logging.getLogger(__name__)
+
 
 async def _parse_itunes_chart(URL, count):
     async with aiohttp.ClientSession() as session:

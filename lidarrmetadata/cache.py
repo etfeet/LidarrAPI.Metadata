@@ -10,14 +10,12 @@ import asyncio
 import asyncpg
 import datetime
 from timeit import default_timer as timer
-
 from aiocache.serializers import BaseSerializer, PickleSerializer
 from aiocache.base import BaseCache
 
+
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler())
-logger.setLevel(logging.INFO)
-logger.info('Have cache logger')
+
 
 try:
     import cPickle as pickle

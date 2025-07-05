@@ -2,8 +2,10 @@ import atexit
 from contextlib import contextmanager
 from multiprocessing import Queue, Process, Value
 import time
-
 import redis
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class RateLimitedError(Exception):
